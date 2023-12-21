@@ -211,44 +211,7 @@ data class CodeModernizerSessionContext(
             }
         }
 
-        // 2. maybe execute maven wrapper command
-        if (shouldTryMvnCommand) {
-            LOG.warn { "Executing mvn" }
-            try {
-                val output = runCommand("mvn")
-                if (output.exitCode != 0) {
-                    LOG.error { "Maven command output:\n$output" }
-                    val error = "The exitCode should be 0 while it was ${output.exitCode}"
-                    CodetransformTelemetry.mvnBuildFailed(
-                        codeTransformSessionId = CodeTransformTelemetryState.instance.getSessionId(),
-                        codeTransformMavenBuildCommand = CodeTransformMavenBuildCommand.Mvn,
-                        reason = error
-                    )
-                    return null
-                } else {
-                    shouldTryMvnCommand = false
-                    LOG.warn { "Maven executed successfully" }
-                }
-            } catch (e: ProcessNotCreatedException) {
-                val error = "Maven failed to execute as its likely not installed to the PATH"
-                CodetransformTelemetry.mvnBuildFailed(
-                    codeTransformSessionId = CodeTransformTelemetryState.instance.getSessionId(),
-                    codeTransformMavenBuildCommand = CodeTransformMavenBuildCommand.Mvn,
-                    reason = error
-                )
-                LOG.warn { error }
-            } catch (e: Exception) {
-                CodetransformTelemetry.mvnBuildFailed(
-                    codeTransformSessionId = CodeTransformTelemetryState.instance.getSessionId(),
-                    codeTransformMavenBuildCommand = CodeTransformMavenBuildCommand.Mvn,
-                    reason = e.message
-                )
-                LOG.error(e) { e.message.toString() }
-                throw e
-            }
-        }
-
-        // 3. intellij-bundled maven runner
+        // 2. intellij-bundled maven runner
         if (shouldTryMvnCommand) {
             LOG.warn { "Executing IntelliJ bundled Maven" }
             val explicitenabled = emptyList<String>()
@@ -286,6 +249,7 @@ data class CodeModernizerSessionContext(
                 }
                 if (createdDependencies.isComplete() == 0) {
                     LOG.warn { "IntelliJ bundled Maven executed successfully" }
+                    shouldTryMvnCommand = false
                 } else if (createdDependencies.isComplete() != Integer.MIN_VALUE) {
                     val error = "The exitCode should be 0 while it was ${createdDependencies.isComplete()}"
                     LOG.error { error }
@@ -308,12 +272,45 @@ data class CodeModernizerSessionContext(
                     reason = t.message
                 )
                 return null
-            } finally {
-                // after the ide bundled maven building finished
-                // change the bottom window to transformation hub
-                showTransformationHub()
             }
         }
+
+        // 3. Execute maven command if needed
+        if (shouldTryMvnCommand) {
+            LOG.warn { "Executing mvn" }
+            try {
+                val output = runCommand("mvn")
+                if (output.exitCode != 0) {
+                    LOG.error { "Maven command output:\n$output" }
+                    val error = "The exitCode should be 0 while it was ${output.exitCode}"
+                    CodetransformTelemetry.mvnBuildFailed(
+                        codeTransformSessionId = CodeTransformTelemetryState.instance.getSessionId(),
+                        codeTransformMavenBuildCommand = CodeTransformMavenBuildCommand.Mvn,
+                        reason = error
+                    )
+                    return null
+                } else {
+                    LOG.warn { "Maven executed successfully" }
+                }
+            } catch (e: ProcessNotCreatedException) {
+                val error = "Maven failed to execute as its likely not installed to the PATH"
+                CodetransformTelemetry.mvnBuildFailed(
+                    codeTransformSessionId = CodeTransformTelemetryState.instance.getSessionId(),
+                    codeTransformMavenBuildCommand = CodeTransformMavenBuildCommand.Mvn,
+                    reason = error
+                )
+                LOG.warn { error }
+            } catch (e: Exception) {
+                CodetransformTelemetry.mvnBuildFailed(
+                    codeTransformSessionId = CodeTransformTelemetryState.instance.getSessionId(),
+                    codeTransformMavenBuildCommand = CodeTransformMavenBuildCommand.Mvn,
+                    reason = e.message
+                )
+                LOG.error(e) { e.message.toString() }
+                throw e
+            }
+        }
+
 
         return destinationDir.toFile()
     }
