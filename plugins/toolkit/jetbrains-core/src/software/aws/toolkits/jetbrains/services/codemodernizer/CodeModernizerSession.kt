@@ -53,6 +53,8 @@ const val ZIP_SOURCES_PATH = "sources"
 const val BUILD_LOG_PATH = "build-logs.txt"
 const val UPLOAD_ZIP_MANIFEST_VERSION = 1.0F
 const val MAX_ZIP_SIZE = 1000000000 // 1GB
+const val UPLOAD_READ_TIMEOUT = 30_000
+const val UPLOAD_CONNECT_TIMEOUT = 30_000
 
 class CodeModernizerSession(
     val sessionContext: CodeModernizerSessionContext,
@@ -240,14 +242,19 @@ class CodeModernizerSession(
     fun uploadArtifactToS3(url: String, fileToUpload: File, checksum: String, kmsArn: String) {
         HttpRequests.put(url, APPLICATION_ZIP).userAgent(AwsClientManager.userAgent).tuner {
             it.setRequestProperty(CONTENT_SHA256, checksum)
+            it.readTimeout = UPLOAD_READ_TIMEOUT
+            it.connectTimeout = UPLOAD_CONNECT_TIMEOUT
             if (kmsArn.isNotEmpty()) {
                 it.setRequestProperty(SERVER_SIDE_ENCRYPTION, AWS_KMS)
                 it.setRequestProperty(SERVER_SIDE_ENCRYPTION_AWS_KMS_KEY_ID, kmsArn)
             }
         }
-            .connect { request -> // default connect timeout is 10s
+            .connect { request ->
                 val connection = request.connection as HttpURLConnection
                 connection.setFixedLengthStreamingMode(fileToUpload.length())
+                connection.connectTimeout = UPLOAD_CONNECT_TIMEOUT
+                connection.readTimeout = UPLOAD_READ_TIMEOUT
+
                 fileToUpload.inputStream().use { inputStream ->
                     connection.outputStream.use {
                         val bufferSize = 4096
