@@ -238,29 +238,64 @@ class CodeModernizerSession(
      * Adapted from [CodeWhispererCodeScanSession]
      */
     fun uploadArtifactToS3(url: String, fileToUpload: File, checksum: String, kmsArn: String) {
+        val timeout = 600_000
+        LOG.warn { "Using read and connect timeout of $timeout" }
+//        AwsCrtAsyncHttpClient.builder()
+//            .maxConcurrency(100)
+//            .connectionTimeout(Duration.ofSeconds(60000))
+//            .connectionMaxIdleTime(Duration.ofSeconds(60000))
+//            .build().use {
+//                it.execute(
+//                    AsyncExecuteRequest.builder()
+//                        .request()
+//                        .build()
+//                )
+//            }
+
         HttpRequests.put(url, APPLICATION_ZIP).userAgent(AwsClientManager.userAgent).tuner {
             it.setRequestProperty(CONTENT_SHA256, checksum)
+            it.readTimeout = timeout
+            it.connectTimeout = timeout
             if (kmsArn.isNotEmpty()) {
                 it.setRequestProperty(SERVER_SIDE_ENCRYPTION, AWS_KMS)
                 it.setRequestProperty(SERVER_SIDE_ENCRYPTION_AWS_KMS_KEY_ID, kmsArn)
             }
+            LOG.warn { "Tuning finished." }
         }
             .connect { request -> // default connect timeout is 10s
+                LOG.warn { "Connection acquired" }
                 val connection = request.connection as HttpURLConnection
+                connection.readTimeout = timeout
+                connection.connectTimeout = timeout
                 connection.setFixedLengthStreamingMode(fileToUpload.length())
                 fileToUpload.inputStream().use { inputStream ->
+                    LOG.warn { "file input stream opened" }
                     connection.outputStream.use {
+                        LOG.warn { "Connection outputstream opened" }
                         val bufferSize = 4096
                         val array = ByteArray(bufferSize)
                         var n = inputStream.readNBytes(array, 0, bufferSize)
+                        var loggedFlush = false
                         while (0 != n) {
                             if (shouldStop.get()) break
                             it.write(array, 0, n)
+                            if (!loggedFlush) {
+                                LOG.warn { "About to flush (start writing first $bufferSize bytes to s3)" }
+                            }
+                            it.flush()
+                            if (!loggedFlush) {
+                                LOG.warn { "Flushed $bufferSize bytes to s3" }
+                                loggedFlush = true
+                            }
                             n = inputStream.readNBytes(array, 0, bufferSize)
                         }
+                        LOG.warn { "End of outputstream use" } // finished successfull
                     }
+                    LOG.warn { "End of inputstream use" }
                 }
+                LOG.warn { "End of connection block" }
             }
+        LOG.warn { "After put, Upload finished" }
     }
 
     /**
