@@ -6,9 +6,15 @@ package software.aws.toolkits.jetbrains.services.codemodernizer
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.runInEdt
 import com.intellij.serviceContainer.AlreadyDisposedException
-import com.intellij.util.io.HttpRequests
+import com.intellij.util.cancelOnDispose
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.apache.commons.codec.digest.DigestUtils
+import software.amazon.awssdk.core.internal.sync.FileContentStreamProvider
+import software.amazon.awssdk.http.HttpExecuteRequest
+import software.amazon.awssdk.http.HttpExecuteResponse
+import software.amazon.awssdk.http.SdkHttpMethod
+import software.amazon.awssdk.http.SdkHttpRequest
 import software.amazon.awssdk.services.codewhispererruntime.model.StartTransformationResponse
 import software.amazon.awssdk.services.codewhispererruntime.model.TransformationJob
 import software.amazon.awssdk.services.codewhispererruntime.model.TransformationLanguage
@@ -18,11 +24,13 @@ import software.aws.toolkits.core.utils.error
 import software.aws.toolkits.core.utils.getLogger
 import software.aws.toolkits.core.utils.info
 import software.aws.toolkits.core.utils.warn
-import software.aws.toolkits.jetbrains.core.AwsClientManager
+import software.aws.toolkits.jetbrains.core.AwsSdkClient
+import software.aws.toolkits.jetbrains.core.coroutines.projectCoroutineScope
 import software.aws.toolkits.jetbrains.core.explorer.refreshCwQTree
 import software.aws.toolkits.jetbrains.services.amazonq.APPLICATION_ZIP
 import software.aws.toolkits.jetbrains.services.amazonq.AWS_KMS
 import software.aws.toolkits.jetbrains.services.amazonq.CONTENT_SHA256
+import software.aws.toolkits.jetbrains.services.amazonq.CONTENT_TYPE
 import software.aws.toolkits.jetbrains.services.amazonq.SERVER_SIDE_ENCRYPTION
 import software.aws.toolkits.jetbrains.services.amazonq.SERVER_SIDE_ENCRYPTION_AWS_KMS_KEY_ID
 import software.aws.toolkits.jetbrains.services.codemodernizer.client.GumbyClient
@@ -43,11 +51,15 @@ import software.aws.toolkits.telemetry.CodeTransformApiNames
 import software.aws.toolkits.telemetry.CodetransformTelemetry
 import java.io.File
 import java.io.FileInputStream
-import java.net.HttpURLConnection
+import java.net.SocketException
+import java.net.URL
 import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.toJavaDuration
+
 
 const val ZIP_SOURCES_PATH = "sources"
 const val BUILD_LOG_PATH = "build-logs.txt"
@@ -74,7 +86,7 @@ class CodeModernizerSession(
      *
      *  Based on [CodeWhispererCodeScanSession]
      */
-    fun createModernizationJob(): CodeModernizerStartJobResult {
+    suspend fun createModernizationJob(): CodeModernizerStartJobResult {
         LOG.info { "Starting Modernization Job" }
         val payload: File?
 
@@ -235,38 +247,74 @@ class CodeModernizerSession(
     fun resumeJob(startTime: Instant, jobId: JobId) = state.putJobHistory(sessionContext, TransformationStatus.STARTED, jobId.id, startTime)
 
     /*
-     * Adapted from [CodeWhispererCodeScanSession]
+     * Upload artifact to s3 using a client based on AwsSdkClient with custom overrides for timeouts.
      */
-    fun uploadArtifactToS3(url: String, fileToUpload: File, checksum: String, kmsArn: String) {
-        HttpRequests.put(url, APPLICATION_ZIP).userAgent(AwsClientManager.userAgent).tuner {
-            it.setRequestProperty(CONTENT_SHA256, checksum)
-            if (kmsArn.isNotEmpty()) {
-                it.setRequestProperty(SERVER_SIDE_ENCRYPTION, AWS_KMS)
-                it.setRequestProperty(SERVER_SIDE_ENCRYPTION_AWS_KMS_KEY_ID, kmsArn)
-            }
+    suspend fun uploadArtifactToS3(url: String, fileToUpload: File, checksum: String, kmsArn: String) {
+        val requestBuilder = SdkHttpRequest.builder()
+            .method(SdkHttpMethod.PUT)
+            .uri(URL(url).toURI())
+            .appendHeader(CONTENT_TYPE, APPLICATION_ZIP)
+            .appendHeader(CONTENT_SHA256, checksum)
+        if (kmsArn.isNotEmpty()) {
+            requestBuilder
+                .appendHeader(SERVER_SIDE_ENCRYPTION, AWS_KMS)
+                .appendHeader(SERVER_SIDE_ENCRYPTION_AWS_KMS_KEY_ID, kmsArn)
         }
-            .connect { request -> // default connect timeout is 10s
-                val connection = request.connection as HttpURLConnection
-                connection.setFixedLengthStreamingMode(fileToUpload.length())
-                fileToUpload.inputStream().use { inputStream ->
-                    connection.outputStream.use {
-                        val bufferSize = 4096
-                        val array = ByteArray(bufferSize)
-                        var n = inputStream.readNBytes(array, 0, bufferSize)
-                        while (0 != n) {
-                            if (shouldStop.get()) break
-                            it.write(array, 0, n)
-                            n = inputStream.readNBytes(array, 0, bufferSize)
-                        }
+
+        // Finish building the request.
+        val executeRequest = HttpExecuteRequest.builder()
+            .request(requestBuilder.build())
+            .contentStreamProvider(FileContentStreamProvider(fileToUpload.toPath()))
+            .build()
+
+        (AwsSdkClient.getInstance() as AwsSdkClient).buildNewClient {
+            it.connectionTimeout(60.seconds.toJavaDuration())
+                .socketTimeout(60.seconds.toJavaDuration())
+                .connectionAcquisitionTimeout(60.seconds.toJavaDuration())
+        }.use { sdkHttpClient ->
+            val request = sdkHttpClient.prepareRequest(executeRequest)
+            var response: HttpExecuteResponse? = null
+            val uploadThread = projectCoroutineScope(sessionContext.project).launch {
+                try {
+                    response = request.call()
+                } catch (e: SocketException) {
+                    if (shouldStop.get()) {
+                        return@launch
                     }
                 }
             }
+            uploadThread.cancelOnDispose(this)
+
+            while (uploadThread.isActive || response == null) {
+                delay(1000)
+                if (shouldStop.get()) {
+                    request.abort()
+                    uploadThread.join()
+                    return@use
+                }
+            }
+
+            val httpResponse = response?.httpResponse()
+
+            if (httpResponse == null) {
+                LOG.info("Response from upload was null")
+                if (isDisposed.get() || uploadThread.isCancelled) return@use
+                else throw CodeModernizerException("Unknown status of upload, response was null")
+            }
+            LOG.info("Status from upload: ${httpResponse.statusCode()}")
+            if (httpResponse.isSuccessful) {
+                LOG.info { "Upload succeeded with statusText: ${httpResponse.statusText().get()}" }
+            } else {
+                LOG.error { httpResponse.statusText().get() }
+                throw CodeModernizerException("Unable to upload artifact via ApacheClient: ${httpResponse.statusText().get()}")
+            }
+        }
     }
 
     /**
      * Adapted from [CodeWhispererCodeScanSession]
      */
-    fun uploadPayload(payload: File): String {
+    suspend fun uploadPayload(payload: File): String {
         val sha256checksum: String = Base64.getEncoder().encodeToString(DigestUtils.sha256(FileInputStream(payload)))
         if (isDisposed.get()) {
             throw AlreadyDisposedException("Disposed when about to create upload URL")

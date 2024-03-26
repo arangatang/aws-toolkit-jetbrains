@@ -23,13 +23,18 @@ import software.aws.toolkits.core.utils.info
 class AwsSdkClient : SdkClientProvider, Disposable {
     private val sdkHttpClient: SdkHttpClient by lazy {
         LOG.info { "Create new Apache client" }
+        buildNewClient { }
+    }
+
+    fun buildNewClient(clientOverrides: (ApacheHttpClient.Builder) -> Unit): SdkHttpClient {
         val httpClientBuilder = ApacheHttpClient.builder()
             .proxyConfiguration(ProxyConfiguration.builder().useSystemPropertyValues(false).build())
             .httpRoutePlanner(SystemDefaultRoutePlanner(CommonProxy.getInstance()))
             .credentialsProvider(SystemDefaultCredentialsProvider())
             .tlsTrustManagersProvider { arrayOf(CertificateManager.getInstance().trustManager) }
 
-        ValidateCorrectThreadClient(httpClientBuilder.build())
+        clientOverrides(httpClientBuilder)
+        return ValidateCorrectThreadClient(httpClientBuilder.build())
     }
 
     override fun sharedSdkClient(): SdkHttpClient = sdkHttpClient

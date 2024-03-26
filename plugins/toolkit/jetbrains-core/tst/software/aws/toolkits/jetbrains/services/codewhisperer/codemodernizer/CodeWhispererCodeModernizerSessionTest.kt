@@ -15,6 +15,7 @@ import com.intellij.testFramework.common.ThreadLeakTracker
 import com.intellij.testFramework.runInEdtAndGet
 import com.intellij.testFramework.runInEdtAndWait
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.apache.commons.codec.digest.DigestUtils
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.fail
@@ -52,7 +53,6 @@ import software.aws.toolkits.jetbrains.utils.rules.HeavyJavaCodeInsightTestFixtu
 import software.aws.toolkits.jetbrains.utils.rules.addFileToModule
 import java.io.File
 import java.io.FileInputStream
-import java.nio.file.Path
 import java.util.Base64
 import java.util.zip.ZipFile
 import kotlin.io.path.Path
@@ -335,7 +335,7 @@ class CodeWhispererCodeModernizerSessionTest : CodeWhispererCodeModernizerTestBa
     }
 
     @Test
-    fun `CodeModernizer can create modernization job`() {
+    fun `CodeModernizer can create modernization job`() = runTest {
         doReturn(ZipCreationResult.Succeeded(File("./tst-resources/codemodernizer/test.txt")))
             .whenever(testSessionContextSpy).createZipWithModuleFiles()
         doReturn(exampleCreateUploadUrlResponse).whenever(clientAdaptorSpy).createGumbyUploadUrl(any())
@@ -398,7 +398,7 @@ class CodeWhispererCodeModernizerSessionTest : CodeWhispererCodeModernizerTestBa
     }
 
     @Test
-    fun `test uploadPayload()`() {
+    fun `test uploadPayload()`() = runTest {
         val s3endpoint = "http://127.0.0.1:${wireMock.port()}"
         val gumbyUploadUrlResponse = CreateUploadUrlResponse.builder()
             .uploadUrl(s3endpoint)
