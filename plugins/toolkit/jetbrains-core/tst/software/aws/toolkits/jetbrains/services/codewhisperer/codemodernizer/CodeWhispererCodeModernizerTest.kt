@@ -12,6 +12,7 @@ import junit.framework.TestCase.assertFalse
 import junit.framework.TestCase.assertNotNull
 import junit.framework.TestCase.assertNull
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import org.junit.Before
 import org.junit.Test
 import org.mockito.Mockito
@@ -65,7 +66,7 @@ class CodeWhispererCodeModernizerTest : CodeWhispererCodeModernizerTestBase() {
     }
 
     @Test
-    fun `test runModernize handles users completed dialog`() {
+    fun `test runModernize handles users completed dialog`() = runTest {
         var mockFile = Mockito.mock(VirtualFile::class.java)
         `when`(mockFile.name).thenReturn("pomx.xml")
         `when`(mockFile.path).thenReturn("/mocked/path/pom.xml")

@@ -267,26 +267,32 @@ class CodeModernizerSession(
             .contentStreamProvider(FileContentStreamProvider(fileToUpload.toPath()))
             .build()
 
+        LOG.warn { "Building new apache client." }
         (AwsSdkClient.getInstance() as AwsSdkClient).buildNewClient {
             it.connectionTimeout(60.seconds.toJavaDuration())
                 .socketTimeout(60.seconds.toJavaDuration())
                 .connectionAcquisitionTimeout(60.seconds.toJavaDuration())
         }.use { sdkHttpClient ->
+            LOG.warn { "Using new apache client." }
             val request = sdkHttpClient.prepareRequest(executeRequest)
             var response: HttpExecuteResponse? = null
             val uploadThread = projectCoroutineScope(sessionContext.project).launch {
                 try {
+                    LOG.warn { "Starting upload." }
                     response = request.call()
+                    LOG.warn { "Upload finished." }
                 } catch (e: SocketException) {
+                    LOG.error(e) { "Socket exception caught." }
                     if (shouldStop.get()) {
                         return@launch
-                    }
+                    } else throw e
                 }
             }
             uploadThread.cancelOnDispose(this)
 
             while (uploadThread.isActive || response == null) {
-                delay(1000)
+                LOG.warn { "waiting for upload to finish" }
+                delay(2000)
                 if (shouldStop.get()) {
                     request.abort()
                     uploadThread.join()
